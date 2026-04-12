@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -51,10 +55,10 @@ jobs:
     
     - name: Create Release
       if: github.ref == 'refs/heads/main'
-      uses: softprops/action-gh-release@v1
+      uses: ncipollo/release-action@v1
       with:
-        files: build/libblockoverlay.so
-        tag_name: v${{ github.run_number }}
+        artifacts: "build/libblockoverlay.so"
+        tag: v${{ github.run_number }}
         name: BlockOverlay Build ${{ github.run_number }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        body: "Automatically built BlockOverlay mod for LeviLaunchroid"
+        token: ${{ secrets.GITHUB_TOKEN }}
