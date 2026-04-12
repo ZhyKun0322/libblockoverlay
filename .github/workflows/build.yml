@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Setup Android NDK
       uses: nttld/setup-ndk@v1
@@ -20,7 +20,7 @@ jobs:
         local-cache: true
     
     - name: Setup CMake
-      uses: jwlawson/actions-setup-cmake@v1.13
+      uses: jwlawson/actions-setup-cmake@v2
       with:
         cmake-version: '3.25.x'
     
@@ -44,7 +44,7 @@ jobs:
         ninja
     
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: blockoverlay-mod
         path: build/libblockoverlay.so
