@@ -1,12 +1,12 @@
-#include <cstdint>
+#include <jni.h>
+#include <android/log.h>
 #include <cstring>
 #include <cmath>
-#include <android/log.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BlockOverlay", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BlockOverlay", __VA_ARGS__)
 
-// Color config - BLUE with 30% transparency
+// Blue color with 30% transparency
 static float g_color[4] = {0.0f, 0.4f, 1.0f, 0.3f};
 
 // Target block info
@@ -15,19 +15,14 @@ static float g_targetY = 0.0f;
 static float g_targetZ = 0.0f;
 static int g_targetFace = 1; // 0=down, 1=up, 2=north, 3=south, 4=west, 5=east
 static bool g_hasTarget = false;
+static JavaVM* g_vm = nullptr;
 
+// Export functions for Minecraft hooks to call
 extern "C" {
-
-// Called when mod loads
-__attribute__((visibility("default"))) 
-void mod_init() {
-    LOGI("BlockOverlay loaded!");
-    LOGI("Color: R=%f G=%f B=%f A=%f", g_color[0], g_color[1], g_color[2], g_color[3]);
-}
 
 // Update target block position (called from Minecraft hook)
 __attribute__((visibility("default")))
-void mod_set_target(float x, float y, float z, int face) {
+void overlay_set_target(float x, float y, float z, int face) {
     g_targetX = x;
     g_targetY = y;
     g_targetZ = z;
@@ -37,14 +32,14 @@ void mod_set_target(float x, float y, float z, int face) {
 
 // Clear target (when not looking at block)
 __attribute__((visibility("default")))
-void mod_clear_target() {
+void overlay_clear_target() {
     g_hasTarget = false;
 }
 
 // Get vertices for the overlay quad
 // Returns 12 floats: 4 vertices * 3 coords (x,y,z)
 __attribute__((visibility("default")))
-void mod_get_vertices(float* out_vertices, float* out_colors) {
+void overlay_get_vertices(float* out_vertices, float* out_colors) {
     if (!g_hasTarget) return;
     
     float x = g_targetX;
@@ -84,7 +79,7 @@ void mod_get_vertices(float* out_vertices, float* out_colors) {
             v[0]=x-offset; v[1]=y;     v[2]=z;
             v[3]=x-offset; v[4]=y;     v[5]=z+1.0;
             v[6]=x-offset; v[7]=y+1.0; v[8]=z+1.0;
-            v[9]=x-offset; v[9]=y+1.0; v[11]=z;
+            v[9]=x-offset; v[10]=y+1.0; v[11]=z;
             break;
         case 5: // East (X+)
             v[0]=x+1.0+offset; v[1]=y;     v[2]=z;
@@ -108,7 +103,7 @@ void mod_get_vertices(float* out_vertices, float* out_colors) {
 
 // Change color
 __attribute__((visibility("default")))
-void mod_set_color(float r, float g, float b, float a) {
+void overlay_set_color(float r, float g, float b, float a) {
     g_color[0] = r;
     g_color[1] = g;
     g_color[2] = b;
@@ -116,13 +111,15 @@ void mod_set_color(float r, float g, float b, float a) {
     LOGI("Color changed to %f,%f,%f,%f", r, g, b, a);
 }
 
-// Get current color
-__attribute__((visibility("default")))
-void mod_get_color(float* out) {
-    out[0] = g_color[0];
-    out[1] = g_color[1];
-    out[2] = g_color[2];
-    out[3] = g_color[3];
-}
-
 } // extern "C"
+
+// JNI_OnLoad - THIS IS CALLED by LeviLaunchroid when loading the .so!
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    g_vm = vm;
+    LOGI("BlockOverlay mod loaded via JNI_OnLoad!");
+    LOGI("Blue overlay ready - RGBA: 0.0, 0.4, 1.0, 0.3");
+    LOGI("Export functions: overlay_set_target, overlay_get_vertices, overlay_set_color");
+    
+    // Return JNI version
+    return JNI_VERSION_1_6;
+}
