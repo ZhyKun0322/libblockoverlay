@@ -6,102 +6,123 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BlockOverlay", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BlockOverlay", __VA_ARGS__)
 
-// Simple mod that draws blue overlay on targeted block
-// Hook into Minecraft's render function
+// Color config - BLUE with 30% transparency
+static float g_color[4] = {0.0f, 0.4f, 1.0f, 0.3f};
+
+// Target block info
+static float g_targetX = 0.0f;
+static float g_targetY = 0.0f;
+static float g_targetZ = 0.0f;
+static int g_targetFace = 1; // 0=down, 1=up, 2=north, 3=south, 4=west, 5=east
+static bool g_hasTarget = false;
 
 extern "C" {
 
-// Mod entry point - called by LeviLaunchroid when loading .so
+// Called when mod loads
 __attribute__((visibility("default"))) 
 void mod_init() {
-    LOGI("BlockOverlay mod loaded!");
-    LOGI("Blue overlay ready - RGBA: 0.0, 0.4, 1.0, 0.3");
+    LOGI("BlockOverlay loaded!");
+    LOGI("Color: R=%f G=%f B=%f A=%f", g_color[0], g_color[1], g_color[2], g_color[3]);
 }
 
-// Called every frame before render
+// Update target block position (called from Minecraft hook)
 __attribute__((visibility("default")))
-void mod_pre_render() {
-    // Update target block info here
+void mod_set_target(float x, float y, float z, int face) {
+    g_targetX = x;
+    g_targetY = y;
+    g_targetZ = z;
+    g_targetFace = face;
+    g_hasTarget = true;
 }
 
-// Called during render - this is where we draw
+// Clear target (when not looking at block)
 __attribute__((visibility("default")))
-void mod_render(void* tessellator_ptr, float x, float y, float z, int face) {
-    if (!tessellator_ptr) return;
+void mod_clear_target() {
+    g_hasTarget = false;
+}
+
+// Get vertices for the overlay quad
+// Returns 12 floats: 4 vertices * 3 coords (x,y,z)
+__attribute__((visibility("default")))
+void mod_get_vertices(float* out_vertices, float* out_colors) {
+    if (!g_hasTarget) return;
     
-    // Blue color with 30% transparency
-    float r = 0.0f;
-    float g = 0.4f;
-    float b = 1.0f;
-    float a = 0.3f;
+    float x = g_targetX;
+    float y = g_targetY;
+    float z = g_targetZ;
+    float offset = 0.002f; // Slightly above block to avoid z-fighting
     
-    // Offset to avoid z-fighting (slightly above block face)
-    float offset = 0.002f;
+    // 4 vertices for quad
+    float v[12];
     
-    // Vertex positions based on face
-    float x1, y1, z1, x2, y2, z2, x3, y3, z3, x4, y4, z4;
-    
-    switch(face) {
+    switch(g_targetFace) {
         case 0: // Down (Y-)
-            x1=x;     y1=y-offset; z1=z;
-            x2=x+1.0; y2=y-offset; z2=z;
-            x3=x+1.0; y3=y-offset; z3=z+1.0;
-            x4=x;     y4=y-offset; z4=z+1.0;
+            v[0]=x;     v[1]=y-offset; v[2]=z;
+            v[3]=x+1.0; v[4]=y-offset; v[5]=z;
+            v[6]=x+1.0; v[7]=y-offset; v[8]=z+1.0;
+            v[9]=x;     v[10]=y-offset; v[11]=z+1.0;
             break;
         case 1: // Up (Y+) - Most common
-            x1=x;     y1=y+1.0+offset; z1=z;
-            x2=x+1.0; y2=y+1.0+offset; z2=z;
-            x3=x+1.0; y3=y+1.0+offset; z3=z+1.0;
-            x4=x;     y4=y+1.0+offset; z4=z+1.0;
+            v[0]=x;     v[1]=y+1.0+offset; v[2]=z;
+            v[3]=x+1.0; v[4]=y+1.0+offset; v[5]=z;
+            v[6]=x+1.0; v[7]=y+1.0+offset; v[8]=z+1.0;
+            v[9]=x;     v[10]=y+1.0+offset; v[11]=z+1.0;
             break;
         case 2: // North (Z-)
-            x1=x;     y1=y;     z1=z-offset;
-            x2=x+1.0; y2=y;     z2=z-offset;
-            x3=x+1.0; y3=y+1.0; z3=z-offset;
-            x4=x;     y4=y+1.0; z4=z-offset;
+            v[0]=x;     v[1]=y;     v[2]=z-offset;
+            v[3]=x+1.0; v[4]=y;     v[5]=z-offset;
+            v[6]=x+1.0; v[7]=y+1.0; v[8]=z-offset;
+            v[9]=x;     v[10]=y+1.0; v[11]=z-offset;
             break;
         case 3: // South (Z+)
-            x1=x;     y1=y;     z1=z+1.0+offset;
-            x2=x+1.0; y2=y;     z2=z+1.0+offset;
-            x3=x+1.0; y3=y+1.0; z3=z+1.0+offset;
-            x4=x;     y4=y+1.0; z4=z+1.0+offset;
+            v[0]=x;     v[1]=y;     v[2]=z+1.0+offset;
+            v[3]=x+1.0; v[4]=y;     v[5]=z+1.0+offset;
+            v[6]=x+1.0; v[7]=y+1.0; v[8]=z+1.0+offset;
+            v[9]=x;     v[10]=y+1.0; v[11]=z+1.0+offset;
             break;
         case 4: // West (X-)
-            x1=x-offset; y1=y;     z1=z;
-            x2=x-offset; y2=y;     z2=z+1.0;
-            x3=x-offset; y3=y+1.0; z3=z+1.0;
-            x4=x-offset; y4=y+1.0; z4=z;
+            v[0]=x-offset; v[1]=y;     v[2]=z;
+            v[3]=x-offset; v[4]=y;     v[5]=z+1.0;
+            v[6]=x-offset; v[7]=y+1.0; v[8]=z+1.0;
+            v[9]=x-offset; v[9]=y+1.0; v[11]=z;
             break;
         case 5: // East (X+)
-            x1=x+1.0+offset; y1=y;     z1=z;
-            x2=x+1.0+offset; y2=y;     z2=z+1.0;
-            x3=x+1.0+offset; y3=y+1.0; z3=z+1.0;
-            x4=x+1.0+offset; y4=y+1.0; z4=z;
+            v[0]=x+1.0+offset; v[1]=y;     v[2]=z;
+            v[3]=x+1.0+offset; v[4]=y;     v[5]=z+1.0;
+            v[6]=x+1.0+offset; v[7]=y+1.0; v[8]=z+1.0;
+            v[9]=x+1.0+offset; v[10]=y+1.0; v[11]=z;
             break;
-        default:
-            return;
     }
     
-    // Call Minecraft's tessellator functions (simplified)
-    // In real implementation, these would be function pointers to MC's tessellator
-    // For now, this shows the structure LeviLaunchroid expects
+    // Copy vertices
+    memcpy(out_vertices, v, 12 * sizeof(float));
     
-    // Pseudo-code for what LeviLaunchroid hooks would do:
-    // tessellator_begin(tessellator_ptr, 7); // 7 = quads
-    // tessellator_vertex(tessellator_ptr, x1, y1, z1, r, g, b, a);
-    // tessellator_vertex(tessellator_ptr, x2, y2, z2, r, g, b, a);
-    // tessellator_vertex(tessellator_ptr, x3, y3, z3, r, g, b, a);
-    // tessellator_vertex(tessellator_ptr, x4, y4, z4, r, g, b, a);
-    // tessellator_end(tessellator_ptr);
-    // tessellator_draw(tessellator_ptr);
-    
-    LOGI("Drawing overlay at %f,%f,%f face %d", x, y, z, face);
+    // Copy colors (RGBA for each vertex)
+    for (int i = 0; i < 4; i++) {
+        out_colors[i*4+0] = g_color[0];
+        out_colors[i*4+1] = g_color[1];
+        out_colors[i*4+2] = g_color[2];
+        out_colors[i*4+3] = g_color[3];
+    }
 }
 
-// Change color (can be called from config)
+// Change color
 __attribute__((visibility("default")))
 void mod_set_color(float r, float g, float b, float a) {
+    g_color[0] = r;
+    g_color[1] = g;
+    g_color[2] = b;
+    g_color[3] = a;
     LOGI("Color changed to %f,%f,%f,%f", r, g, b, a);
+}
+
+// Get current color
+__attribute__((visibility("default")))
+void mod_get_color(float* out) {
+    out[0] = g_color[0];
+    out[1] = g_color[1];
+    out[2] = g_color[2];
+    out[3] = g_color[3];
 }
 
 } // extern "C"
