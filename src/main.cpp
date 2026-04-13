@@ -1,125 +1,131 @@
 #include <jni.h>
 #include <android/log.h>
 #include <cstring>
-#include <cmath>
+#include <dlfcn.h>
+#include <link.h>
+#include <sys/mman.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BlockOverlay", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BlockOverlay", __VA_ARGS__)
 
-// Blue color with 30% transparency
+// Color config - BLUE with 30% transparency
 static float g_color[4] = {0.0f, 0.4f, 1.0f, 0.3f};
 
-// Target block info
-static float g_targetX = 0.0f;
-static float g_targetY = 0.0f;
-static float g_targetZ = 0.0f;
-static int g_targetFace = 1; // 0=down, 1=up, 2=north, 3=south, 4=west, 5=east
-static bool g_hasTarget = false;
-static JavaVM* g_vm = nullptr;
+// Module base address
+static void* g_mcBase = nullptr;
+static size_t g_mcSize = 0;
 
-// Export functions for Minecraft hooks to call
-extern "C" {
+// Function signatures (bytes to search for)
+// These are common ARM64 function prologues near our string refs
 
-// Update target block position (called from Minecraft hook)
-__attribute__((visibility("default")))
-void overlay_set_target(float x, float y, float z, int face) {
-    g_targetX = x;
-    g_targetY = y;
-    g_targetZ = z;
-    g_targetFace = face;
-    g_hasTarget = true;
+// Pattern for pickBlock area (near 0x0207fdcf)
+static uint8_t s_pickBlock_pattern[] = {
+    0xFD, 0x7B, 0xBF, 0xA9,  // stp x29, x30, [sp, #-0x10]!
+    0xFD, 0x03, 0x00, 0x91,  // mov x29, sp
+    // ... more bytes would go here
+};
+
+// Scan memory for pattern
+void* scanPattern(void* start, size_t size, uint8_t* pattern, size_t patternLen) {
+    uint8_t* data = (uint8_t*)start;
+    for (size_t i = 0; i < size - patternLen; i++) {
+        if (memcmp(data + i, pattern, patternLen) == 0) {
+            return data + i;
+        }
+    }
+    return nullptr;
 }
 
-// Clear target (when not looking at block)
-__attribute__((visibility("default")))
-void overlay_clear_target() {
-    g_hasTarget = false;
-}
-
-// Get vertices for the overlay quad
-// Returns 12 floats: 4 vertices * 3 coords (x,y,z)
-__attribute__((visibility("default")))
-void overlay_get_vertices(float* out_vertices, float* out_colors) {
-    if (!g_hasTarget) return;
-    
-    float x = g_targetX;
-    float y = g_targetY;
-    float z = g_targetZ;
-    float offset = 0.002f; // Slightly above block to avoid z-fighting
-    
-    // 4 vertices for quad
-    float v[12];
-    
-    switch(g_targetFace) {
-        case 0: // Down (Y-)
-            v[0]=x;     v[1]=y-offset; v[2]=z;
-            v[3]=x+1.0; v[4]=y-offset; v[5]=z;
-            v[6]=x+1.0; v[7]=y-offset; v[8]=z+1.0;
-            v[9]=x;     v[10]=y-offset; v[11]=z+1.0;
-            break;
-        case 1: // Up (Y+) - Most common
-            v[0]=x;     v[1]=y+1.0+offset; v[2]=z;
-            v[3]=x+1.0; v[4]=y+1.0+offset; v[5]=z;
-            v[6]=x+1.0; v[7]=y+1.0+offset; v[8]=z+1.0;
-            v[9]=x;     v[10]=y+1.0+offset; v[11]=z+1.0;
-            break;
-        case 2: // North (Z-)
-            v[0]=x;     v[1]=y;     v[2]=z-offset;
-            v[3]=x+1.0; v[4]=y;     v[5]=z-offset;
-            v[6]=x+1.0; v[7]=y+1.0; v[8]=z-offset;
-            v[9]=x;     v[10]=y+1.0; v[11]=z-offset;
-            break;
-        case 3: // South (Z+)
-            v[0]=x;     v[1]=y;     v[2]=z+1.0+offset;
-            v[3]=x+1.0; v[4]=y;     v[5]=z+1.0+offset;
-            v[6]=x+1.0; v[7]=y+1.0; v[8]=z+1.0+offset;
-            v[9]=x;     v[10]=y+1.0; v[11]=z+1.0+offset;
-            break;
-        case 4: // West (X-)
-            v[0]=x-offset; v[1]=y;     v[2]=z;
-            v[3]=x-offset; v[4]=y;     v[5]=z+1.0;
-            v[6]=x-offset; v[7]=y+1.0; v[8]=z+1.0;
-            v[9]=x-offset; v[10]=y+1.0; v[11]=z;
-            break;
-        case 5: // East (X+)
-            v[0]=x+1.0+offset; v[1]=y;     v[2]=z;
-            v[3]=x+1.0+offset; v[4]=y;     v[5]=z+1.0;
-            v[6]=x+1.0+offset; v[7]=y+1.0; v[8]=z+1.0;
-            v[9]=x+1.0+offset; v[10]=y+1.0; v[11]=z;
-            break;
+// Get Minecraft base address
+bool getMinecraftModule() {
+    Dl_info info;
+    if (dladdr((void*)&JNI_OnLoad, &info) == 0) {
+        LOGE("dladdr failed");
+        return false;
     }
     
-    // Copy vertices
-    memcpy(out_vertices, v, 12 * sizeof(float));
-    
-    // Copy colors (RGBA for each vertex)
-    for (int i = 0; i < 4; i++) {
-        out_colors[i*4+0] = g_color[0];
-        out_colors[i*4+1] = g_color[1];
-        out_colors[i*4+2] = g_color[2];
-        out_colors[i*4+3] = g_color[3];
+    // Walk through loaded modules
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) {
+        LOGE("Failed to open /proc/self/maps");
+        return false;
     }
-}
-
-// Change color
-__attribute__((visibility("default")))
-void overlay_set_color(float r, float g, float b, float a) {
-    g_color[0] = r;
-    g_color[1] = g;
-    g_color[2] = b;
-    g_color[3] = a;
-    LOGI("Color changed to %f,%f,%f,%f", r, g, b, a);
-}
-
-} // extern "C"
-
-// JNI_OnLoad - THIS IS CALLED by LeviLaunchroid when loading the .so!
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    g_vm = vm;
-    LOGI("BlockOverlay mod loaded via JNI_OnLoad!");
-    LOGI("Blue overlay ready - RGBA: 0.0, 0.4, 1.0, 0.3");
-    LOGI("Export functions: overlay_set_target, overlay_get_vertices, overlay_set_color");
     
-    // Return JNI version
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "libminecraftpe.so")) {
+            LOGI("Found: %s", line);
+            // Parse line: start-end perms offset dev inode pathname
+            unsigned long start, end;
+            if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+                if (!g_mcBase) {
+                    g_mcBase = (void*)start;
+                    g_mcSize = end - start;
+                    LOGI("Minecraft base: %p, size: %zu", g_mcBase, g_mcSize);
+                }
+            }
+        }
+    }
+    fclose(fp);
+    return g_mcBase != nullptr;
+}
+
+// Hook function using PLT/GOT or direct patch
+bool hookFunction(void* target, void* replacement, void** original) {
+    // Simple hook: just log for now
+    LOGI("Hook target: %p -> %p", target, replacement);
+    *original = target;
+    return true;
+}
+
+// Our replacement render function
+void hooked_render() {
+    LOGI("Render hook called!");
+    // Call original
+    // Draw our overlay here
+}
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    LOGI("BlockOverlay loading...");
+    
+    // Get Minecraft module info
+    if (!getMinecraftModule()) {
+        LOGE("Failed to find Minecraft module");
+        return JNI_VERSION_1_6;
+    }
+    
+    // Calculate actual addresses from our string refs
+    // String refs we found:
+    // pickBlock: 0x0207fdcf -> function likely nearby
+    // clip: 0x01f9a9a9
+    // getBlock: 0x0063bbb7
+    // HitResult: 0x01ff9196
+    
+    // For now, just log what we found
+    LOGI("String references:");
+    LOGI("  pickBlock @ %p", (char*)g_mcBase + 0x0207fdcf);
+    LOGI("  clip @ %p", (char*)g_mcBase + 0x01f9a9a9);
+    LOGI("  getBlock @ %p", (char*)g_mcBase + 0x0063bbb7);
+    LOGI("  HitResult @ %p", (char*)g_mcBase + 0x01ff9196);
+    
+    // TODO: Scan backwards from strings to find function starts
+    // TODO: Hook the render function
+    
+    LOGI("BlockOverlay loaded - ready for hooks");
     return JNI_VERSION_1_6;
+}
+
+// Export functions for manual hooking from external tools
+extern "C" {
+    __attribute__((visibility("default")))
+    void overlay_set_color(float r, float g, float b, float a) {
+        g_color[0] = r; g_color[1] = g; g_color[2] = b; g_color[3] = a;
+        LOGI("Color: %f,%f,%f,%f", r, g, b, a);
+    }
+    
+    __attribute__((visibility("default")))
+    void overlay_draw(float x, float y, float z, int face) {
+        // This would be called from hooked render function
+        LOGI("Draw at %f,%f,%f face %d", x, y, z, face);
+    }
 }
