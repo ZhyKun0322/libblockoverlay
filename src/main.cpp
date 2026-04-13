@@ -2,6 +2,9 @@
 #include <android/log.h>
 #include <cstring>
 #include <cstdio>
+#include <dlfcn.h>
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "BlockOverlay", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "BlockOverlay", __VA_ARGS__)
@@ -9,69 +12,143 @@
 // Color config - BLUE with 30% transparency
 static float g_color[4] = {0.0f, 0.4f, 1.0f, 0.3f};
 
-// Module base address
-static void* g_mcBase = nullptr;
-static size_t g_mcSize = 0;
+// Hook original eglSwapBuffers
+static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay dpy, EGLSurface surface) = nullptr;
 
-// Get Minecraft base address
-bool getMinecraftModule() {
-    // Walk through loaded modules
-    std::FILE* fp = std::fopen("/proc/self/maps", "r");
-    if (!fp) {
-        LOGE("Failed to open /proc/self/maps");
-        return false;
-    }
+// Simple overlay drawing function
+static void drawOverlay() {
+    // Save GL state
+    GLboolean blend = glIsEnabled(GL_BLEND);
+    GLint lastBlendSrc, lastBlendDst;
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &lastBlendSrc);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &lastBlendDst);
+    
+    // Enable blending for transparency
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    
+    // Disable depth test so overlay appears on top
+    GLboolean depth = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    
+    // Set up orthographic projection (2D drawing)
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrthof(0, 1, 0, 1, -1, 1);
+    
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    
+    // Draw blue quad in center of screen (test)
+    // In real implementation, this would be at the targeted block position
+    float r = g_color[0], g = g_color[1], b = g_color[2], a = g_color[3];
+    
+    glBegin(GL_QUADS);
+    glColor4f(r, g, b, a);
+    glVertex2f(0.4f, 0.4f);  // Bottom-left
+    glVertex2f(0.6f, 0.4f);  // Bottom-right
+    glVertex2f(0.6f, 0.6f);  // Top-right
+    glVertex2f(0.4f, 0.6f);  // Top-left
+    glEnd();
+    
+    // Restore GL state
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    
+    if (depth) glEnable(GL_DEPTH_TEST);
+    if (!blend) glDisable(GL_BLEND);
+    glBlendFunc(lastBlendSrc, lastBlendDst);
+}
+
+// Hooked eglSwapBuffers - called every frame!
+static EGLBoolean hooked_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    // Draw our overlay before swapping buffers
+    drawOverlay();
+    
+    // Call original function
+    return orig_eglSwapBuffers(dpy, surface);
+}
+
+// Get library address
+void* getLibraryAddress(const char* name) {
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return nullptr;
     
     char line[512];
-    while (std::fgets(line, sizeof(line), fp)) {
-        if (std::strstr(line, "libminecraftpe.so")) {
-            LOGI("Found: %s", line);
-            // Parse line: start-end perms offset dev inode pathname
-            unsigned long start, end;
-            if (std::sscanf(line, "%lx-%lx", &start, &end) == 2) {
-                if (!g_mcBase) {
-                    g_mcBase = (void*)start;
-                    g_mcSize = end - start;
-                    LOGI("Minecraft base: %p, size: %zu", g_mcBase, g_mcSize);
-                    break;  // Just get first occurrence
-                }
+    void* addr = nullptr;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, name) && strstr(line, "r-xp")) {
+            unsigned long start;
+            if (sscanf(line, "%lx-", &start) == 1) {
+                addr = (void*)start;
+                break;
             }
         }
     }
-    std::fclose(fp);
-    return g_mcBase != nullptr;
+    fclose(fp);
+    return addr;
 }
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    LOGI("BlockOverlay loading...");
-    
-    // Get Minecraft module info
-    if (!getMinecraftModule()) {
-        LOGE("Failed to find Minecraft module");
-        return JNI_VERSION_1_6;
+// Simple PLT hook - replace function pointer in GOT/PLT
+bool hookFunction(const char* libName, const char* symbol, void* newFunc, void** oldFunc) {
+    void* libAddr = getLibraryAddress(libName);
+    if (!libAddr) {
+        LOGE("Failed to find %s", libName);
+        return false;
     }
     
-    // Calculate actual addresses from our string refs
-    LOGI("String references:");
-    LOGI("  pickBlock @ %p", (char*)g_mcBase + 0x0207fdcf);
-    LOGI("  clip @ %p", (char*)g_mcBase + 0x01f9a9a9);
-    LOGI("  getBlock @ %p", (char*)g_mcBase + 0x0063bbb7);
-    LOGI("  HitResult @ %p", (char*)g_mcBase + 0x01ff9196);
+    // Get symbol address using dlsym
+    void* symAddr = dlsym(RTLD_DEFAULT, symbol);
+    if (!symAddr) {
+        LOGE("Failed to find symbol %s", symbol);
+        return false;
+    }
     
-    LOGI("BlockOverlay loaded - ready for hooks");
+    *oldFunc = symAddr;
+    
+    // Replace function pointer (simplified - real implementation needs memory protection)
+    // For now, just log that we found it
+    LOGI("Found %s at %p, would hook to %p", symbol, symAddr, newFunc);
+    
+    return true;
+}
+
+// Initialize hooks
+void initHooks() {
+    LOGI("Initializing hooks...");
+    
+    // Hook eglSwapBuffers to draw overlay every frame
+    if (hookFunction("libEGL.so", "eglSwapBuffers", (void*)hooked_eglSwapBuffers, (void**)&orig_eglSwapBuffers)) {
+        LOGI("eglSwapBuffers hook ready");
+    }
+}
+
+// Constructor - runs when .so is loaded!
+__attribute__((constructor))
+void onModLoad() {
+    LOGI("========================================");
+    LOGI("BlockOverlay MOD LOADED!");
+    LOGI("========================================");
+    
+    initHooks();
+    
+    LOGI("BlockOverlay initialization complete");
+}
+
+// Also export JNI_OnLoad for compatibility
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    LOGI("BlockOverlay JNI_OnLoad called");
     return JNI_VERSION_1_6;
 }
 
-// Export functions for manual hooking from external tools
+// Export functions for configuration
 extern "C" {
     __attribute__((visibility("default")))
     void overlay_set_color(float r, float g, float b, float a) {
         g_color[0] = r; g_color[1] = g; g_color[2] = b; g_color[3] = a;
         LOGI("Color: %f,%f,%f,%f", r, g, b, a);
-    }
-    
-    __attribute__((visibility("default")))
-    void overlay_draw(float x, float y, float z, int face) {
-        LOGI("Draw at %f,%f,%f face %d", x, y, z, face);
     }
 }
